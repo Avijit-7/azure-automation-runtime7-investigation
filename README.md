@@ -2,24 +2,30 @@
 
 ## Overview
 
-While testing Azure Automation Runtime Environment 7.x on Hybrid Workers, I encountered an unexpected behavior.
+While testing Azure Automation Runtime Environment 7.x on Hybrid Workers, I encountered an unexpected behavior when migrating a runbook pattern that previously worked in PowerShell 5.1.
 
-A parent runbook was able to call a local child script successfully in PowerShell 5.1, but the same implementation failed when executed using Runtime Environment 7.x.
+A parent runbook was able to invoke a local child script successfully in PowerShell 5.1:
 
-The following error was observed:
-
-```text
-The term '.\init-test-variables.ps1' is not recognized as a name of a cmdlet,
-function, script file, or executable program.
+```powershell
+.\init-test-variables.ps1
 ```
 
-This investigation explores:
+However, the same implementation failed when executed using Runtime Environment 7.x.
 
-- Why the behavior differs between PowerShell 5.1 and Runtime Environment 7.x
-- How child runbooks are executed in Azure Automation
-- Authentication considerations
+This repository documents the investigation, testing methodology, findings, root cause analysis, and recommended migration approach.
+
+---
+
+## Objective
+
+The purpose of this investigation was to understand:
+
+- Why local child script invocation works in PowerShell 5.1
+- Why the same pattern fails in Runtime Environment 7.x
+- How Azure Automation executes child runbooks
+- Authentication requirements between runbooks
 - Hybrid Worker execution behavior
-- Recommended migration patterns for Runtime Environment 7.x
+- Recommended migration patterns
 
 ---
 
@@ -29,36 +35,15 @@ This investigation explores:
 |------------|------------|
 | Azure Automation | Cloud |
 | PowerShell | 5.1 |
-| PowerShell | 7.4 |
-| PowerShell | 7.6 |
+| PowerShell | 7.4 Runtime Environment |
 | Execution Target | Hybrid Worker |
-| Execution Target | Azure Cloud (ACI) |
+| Authentication | Managed Identity |
 
 ---
 
-## Problem Statement
+# Architecture
 
-The following implementation worked successfully in PowerShell 5.1:
-
-```powershell
-$ChildOutput = .\init-test-variables.ps1
-```
-
-However, the same pattern failed in Runtime Environment 7.x with:
-
-```text
-The term '.\init-test-variables.ps1' is not recognized...
-```
-
-This raised an important question:
-
-Why does local child script execution work in PowerShell 5.1 but fail in Runtime Environment 7.x?
-
----
-
-## Execution Architecture
-
-### PowerShell 5.1
+## PowerShell 5.1
 
 ```text
 Main Runbook
@@ -69,7 +54,7 @@ Main Runbook
             +--> Same Context
 ```
 
-### Runtime Environment 7.x
+## Runtime Environment 7.x
 
 ```text
 Main Runbook
@@ -81,154 +66,293 @@ Main Runbook
                 +--> Separate Authentication
 ```
 
-### Key Difference
+## Azure Automation Account
 
-PowerShell 5.1 allows local script execution within the same process and execution context.
+Created an Automation Account over the Central India region.
 
-Runtime Environment 7.x introduces stronger execution isolation and encourages child runbooks to be executed as independent Azure Automation jobs.
+![Automation Account](images/01-automation-account.png)
 
 ---
 
-## Lab Setup
+# PowerShell 5.1 Validation
 
-### Step 1
+## Child Runbook
 
-Created an Azure Automation Account.
-
-### Step 2
-
-Created a child script:
+Script:
 
 ```powershell
+# Create a hashtable named $CommonVars to store values that can be shared
+# with the parent runbook or other scripts.
 $CommonVars = @{
+    
+    # Sample key-value pair.
+    # Key   : Message
+    # Value : "Hello from child runbook"
     Message = "Hello from child runbook"
 }
-
+# Return the hashtable to the calling runbook.
+# The parent runbook can access the value using:
+# $ReturnedVars.Message
 return $CommonVars
+
 ```
 
-### Step 3
+Runbook Configuration:
 
-Created a parent runbook:
+![PS 5.1 Child Runbook](images/02-init-test-variables-5_1-runbook.png)
+
+Execution Output:
+
+![PS 5.1 Child Output](images/03-init-test-variables-5_1-output.png)
+
+### Observation
+
+The child runbook executed successfully and returned the expected output.
+
+---
+
+## Parent Runbook
+
+Script:
 
 ```powershell
+# Display the current working directory to verify where the runbook/script is executing from.
 Write-Output "PWD = $(Get-Location)"
-
+# List all PowerShell scripts (*.ps1) in the current directory.
+# Useful for confirming that the child script is present and accessible.
+Get-ChildItem . -Filter *.ps1 | Select Name
+# Log a message indicating that the child script execution test is starting.
 Write-Output "Testing local script call"
-
-$ChildOutput = .\init-test-variables.ps1
-
+# Execute the child script and capture its output in the $ChildOutput variable.
+$ChildOutput = .\init-test-variables_5-1.ps1
+# Display the output returned by the child script.
 Write-Output $ChildOutput
+
 ```
 
-### Step 4
+Runbook Configuration:
 
-Executed the runbook using PowerShell 5.1.
+![PS 5.1 Parent Runbook](images/04-MainRunbook_5-1-runbook.png)
 
-Result:
+Execution Output:
 
-```text
-Success
-```
+![PS 5.1 Parent Output](images/05-MainRunbook_5-1-output.png)
 
-### Step 5
+### Observation
 
-Executed the same runbook using Runtime Environment 7.x.
-
-Result:
-
-```text
-Failure
-```
-
----
-
-## Error Analysis
-
-Job Stream Output:
-
-```text
-PWD = C:\Packages\Plugins\Microsoft.Azure.Automation.HybridWorker...
-
-Testing local script call
-
-The term '.\init-test-variables.ps1' is not recognized...
-```
-
-The current working directory was:
-
-```text
-C:\Packages\Plugins\Microsoft.Azure.Automation.HybridWorker...
-```
-
-PowerShell attempted to locate:
+The parent runbook successfully executed the child script using:
 
 ```powershell
 .\init-test-variables.ps1
 ```
 
-inside that directory.
-
-Since the file did not exist there, PowerShell was unable to locate it and execution failed.
+The child script executed within the same execution context.
 
 ---
 
-## Root Cause Analysis
+# Runtime Environment 7.4 Validation
 
-Initially, the issue appeared to be a Runtime Environment 7.x defect.
+## Child Runbook
 
-Investigation showed that the failure was actually caused by execution context differences.
+Runbook Configuration:
 
-In PowerShell 5.1:
+![Runtime 7.4 Child Runbook](images/06-init-test-variables-7_4-runbook.png)
 
-- Local script invocation was supported.
-- The child script was available in the execution environment.
-- Parent and child execution remained within the same context.
+Execution Output:
 
-In Runtime Environment 7.x:
+![Runtime 7.4 Child Output](images/07-init-test-variables-7_4-output.png)
 
-- Execution occurs in an isolated runtime environment.
-- Local script files are not automatically available.
-- Relative path execution cannot assume the child script exists.
+### Observation
 
-Therefore:
+The child runbook executed successfully when run independently.
+
+---
+
+## Parent Runbook
+
+Runbook Configuration:
+
+![Runtime 7.4 Parent Runbook](images/08-MainRunbook-7_4-runbook.png)
+
+Execution Output:
+
+![Runtime 7.4 Parent Output](images/09-MainRunbook-7_4-output.png)
+
+Error Encountered:
+
+![Runtime 7.4 Error](images/10-MainRunbook-7_4-output-error.png)
+
+### Observation
+
+The runbook failed when attempting to execute:
 
 ```powershell
 .\init-test-variables.ps1
 ```
 
-is no longer a reliable pattern.
+Error:
 
-The issue was caused by execution context isolation rather than a platform defect.
+```text
+The term '.\init-test-variables.ps1' is not recognized as a name of a cmdlet,
+function, script file, or executable program.
+```
 
 ---
 
-## Recommended Solution
+# Local Directory Validation
 
-Microsoft recommends executing child runbooks using:
+To validate whether the issue was related to the execution environment, a test was performed to inspect the local directory accessible to the Runtime Environment. (C:\Packages\Plugins\Microsoft.Azure.Automation.HybridWorker.HybridWorkerForWindows\1.3.76\HybridWorkerPackage\HybridWorkerAgent)
+
+Script:
+
+```powershell
+# Create a hashtable named $CommonVars to store values that can be shared
+# with the parent runbook or other scripts.
+$CommonVars = @{
+    
+    # Sample key-value pair.
+    # Key   : Message
+    # Value : "Hello from child runbook"
+    Message = "Hello from child runbook"
+}
+# Return the hashtable to the calling runbook.
+# The parent runbook can access the value using:
+# $ReturnedVars.Message
+return $CommonVars.Message
+```
+
+Output:
+
+![Local Directory Validation](images/11-MainRunbook-7_4-output-local-directory-childrunbook.png)
+
+### Observation
+
+The child script file was not available in the runtime execution directory.
+
+This confirmed that Runtime Environment 7.4 could not locate the referenced script using a relative path.
+
+---
+
+# Microsoft Documentation Validation
+
+Microsoft documentation was reviewed to verify supported child runbook execution patterns.
+
+[Azure Automation Runbook Types](https://learn.microsoft.com/azure/automation/automation-runbook-types)
+
+![Microsoft Documentation](images/12-learn-runbook-types-document.png)
+
+### Observation
+
+The documented guidance aligns with using Azure Automation child runbooks rather than relying on local script execution patterns.
+- [Start-AzAutomationRunbook](https://learn.microsoft.com/powershell/module/az.automation/start-azautomationrunbook)
+- [Get-AzAutomationJobOutput](https://learn.microsoft.com/en-us/powershell/module/az.automation/get-azautomationjoboutput)
+---
+
+# Updated Runtime Environment 7.4 Implementation
+
+Script:
+
+```powershell
+# Display the current working directory to verify where the runbook/script is executing from.
+Write-Output "PWD = $(Get-Location)"
+# List all PowerShell scripts (*.ps1) in the current directory.
+# Useful for confirming that the child script is present and accessible.
+Get-ChildItem . -Filter *.ps1 | Select Name
+# Log a message indicating that the child script execution test is starting.
+#//Write-Output "Testing local script call"
+# Execute the child script and capture its output in the $ChildOutput variable.
+#//$ChildOutput = .\init-test-variables.ps1
+# Display the output returned by the child script.
+#//Write-Output $ChildOutput
+# Connect to Azure using Managed Identity
+Connect-AzAccount -Identity
+# Variables
+$ResourceGroupName = "CyberSecurityTraining"
+$AutomationAccountName = "SecOpsDev"
+$ChildRunbookName = "init-test-variables"
+# Start the child runbook
+Write-Output "Starting child runbook: $ChildRunbookName"
+$Job = Start-AzAutomationRunbook `
+    -ResourceGroupName $ResourceGroupName `
+    -AutomationAccountName $AutomationAccountName `
+    -Name $ChildRunbookName
+Write-Output "Child runbook started successfully."
+Write-Output "Job ID: $($Job.JobId)"
+# Wait for completion
+do {
+    Start-Sleep -Seconds 5
+    $JobStatus = Get-AzAutomationJob `
+        -ResourceGroupName $ResourceGroupName `
+        -AutomationAccountName $AutomationAccountName `
+        -Id $Job.JobId
+    Write-Output "Current Status: $($JobStatus.Status)"
+} while ($JobStatus.Status -eq "Running" -or $JobStatus.Status -eq "New" -or $JobStatus.Status -eq "Activating")
+# Display final status
+Write-Output "Final Status: $($JobStatus.Status)"
+# Retrieve output records
+$OutputRecords = Get-AzAutomationJobOutput `
+    -ResourceGroupName $ResourceGroupName `
+    -AutomationAccountName $AutomationAccountName `
+    -Id $Job.JobId
+# Retrieve actual output messages
+Write-Output "===== CHILD RUNBOOK OUTPUT ====="
+foreach ($Record in $OutputRecords)
+{
+    $Output = Get-AzAutomationJobOutputRecord `
+        -ResourceGroupName $ResourceGroupName `
+        -AutomationAccountName $AutomationAccountName `
+        -JobId $Job.JobId `
+        -Id $Record.StreamRecordId
+
+    Write-Output $Output.Value
+    Write-Output $Output.Value.Message
+}
+```
+
+Execution Output:
+
+![Updated Runtime 7.4 Implementation](images/13-MainRunbook-output-updated-calling-child-runbook-azure.png)
+
+### Observation
+
+Using:
 
 ```powershell
 Start-AzAutomationRunbook
 ```
 
-Example:
+successfully executed the child runbook.
 
-```powershell
-Connect-AzAccount -Identity
-
-$Job = Start-AzAutomationRunbook `
-    -ResourceGroupName $ResourceGroupName `
-    -AutomationAccountName $AutomationAccountName `
-    -Name "init-test-variables"
-```
-
-This creates a dedicated Azure Automation job for the child runbook.
+This approach aligns with Azure Automation Runtime Environment 7.x execution behavior.
 
 ---
 
-## Key Findings
+# Hybrid Worker Observation
 
-### Finding 1 – Child Runbooks Execute as Separate Jobs
+Execution behavior was further validated using Hybrid Workers.
+
+![Execution Environment Difference](images/14-difference-in-execution-environment.png)
+
+### Observation
+
+A parent runbook executing on a Hybrid Worker does not automatically guarantee that a child runbook executes on the same worker.
+
+Explicit worker targeting should be used when required.
+
+---
+
+
+### Key Difference
+
+PowerShell 5.1 allows local script execution within the same execution context.
+
+Runtime Environment 7.x introduces stronger execution isolation and encourages child runbooks to be executed as independent Azure Automation jobs.
+
+---
+
+# Key Findings
+
+## Finding 1 – Child Runbooks Execute as Separate Jobs
 
 When using:
 
@@ -236,36 +360,25 @@ When using:
 Start-AzAutomationRunbook
 ```
 
-Azure Automation creates:
-
-- A Parent Job
-- A Child Job
-
-Each receives its own Job ID.
+Azure Automation creates a separate job for the child runbook.
 
 ```text
-Parent Runbook
-    |
-    +--> Child Runbook
-            |
-            +--> Separate Job ID
+Parent Runbook Job
+        |
+        +--> Start-AzAutomationRunbook
+                    |
+                    +--> Child Runbook Job
 ```
 
 ---
 
-### Finding 2 – Child Runbooks Do Not Automatically Run on the Same Hybrid Worker
+## Finding 2 – Execution Context Is Not Shared
 
-Running the parent on a Hybrid Worker does not automatically cause the child runbook to execute on that same worker.
+The child runbook executes in its own execution context and should be treated as an independent workload.
 
-Example:
+To explicitly execute the child runbook on a Hybrid Worker, the **-RunOn** parameter should be provided:
 
-```powershell
-Start-AzAutomationRunbook -Name "init-test-variables"
-```
-
-To guarantee Hybrid Worker execution:
-
-```powershell
+```text
 Start-AzAutomationRunbook `
     -Name "init-test-variables" `
     -RunOn "HybridWorkerName"
@@ -273,96 +386,104 @@ Start-AzAutomationRunbook `
 
 ---
 
-### Finding 3 – Authentication Is Required
+## Finding 3 – Authentication Must Be Explicit
 
-Before starting another runbook:
+Authentication established in the parent runbook is not automatically inherited by the child runbook.
+
+Each runbook should establish its own authentication context.
 
 ```powershell
 Connect-AzAccount -Identity
+Start-AzAutomationRunbook ...
 ```
+---
 
-must be performed.
+## Finding 4 – Hybrid Worker Execution Is Not Automatically Inherited
 
-Without authentication:
+Running the parent runbook on a Hybrid Worker does not automatically guarantee that the child runbook executes on the same worker.
+
+Explicit worker targeting should be used when required.
+
+---
+
+## Finding 5 – Runtime Environment 7.x Uses Stronger Isolation
+
+Legacy PowerShell 5.1 patterns relying on local script execution should be reviewed before migration.
+
+---
+
+# Root Cause Analysis
+
+The issue was not caused by a Runtime Environment 7.x defect.
+
+The failure occurred because:
+
+- The child script was not available in the Runtime Environment execution context.
+- Relative path execution could not resolve the referenced script.
+- Runtime Environment 7.x introduces stronger execution isolation than PowerShell 5.1.
+
+As a result:
 
 ```powershell
-Start-AzAutomationRunbook
+.\init-test-variables.ps1
 ```
 
-cannot communicate with Azure Automation.
+is not a reliable migration pattern.
 
 ---
 
-### Finding 4 – Authentication Is Not Shared
+# Recommended Solution
 
-Authentication established in one runbook is not automatically inherited by another runbook.
+Use Azure Automation child runbooks instead of local script invocation.
 
-Each runbook should establish its own Azure authentication context.
+Example:
 
----
+```powershell
+Connect-AzAccount -Identity
 
-### Finding 5 – Runtime Environment 7.x Introduces Stronger Isolation
-
-PowerShell 5.1 implementations often relied on shared initialization patterns.
-
-Examples:
-
-- Authentication runbooks
-- Variable initialization runbooks
-- Shared configuration scripts
-- Key Vault retrieval scripts
-
-These assumptions should be reviewed when migrating to Runtime Environment 7.x.
+Start-AzAutomationRunbook `
+    -ResourceGroupName "<ResourceGroupName>" `
+    -AutomationAccountName "<AutomationAccountName>" `
+    -Name "init-test-variables"
+```
 
 ---
 
-## Migration Checklist
+# Lessons Learned
 
-Before migrating from PowerShell 5.1 to Runtime Environment 7.x:
-
-- Verify all local child script calls
-- Remove assumptions about shared authentication
-- Validate Hybrid Worker execution paths
-- Test initialization runbooks
-- Review relative-path dependencies
-- Validate output retrieval logic
-- Treat each runbook as an independent workload
-
----
-
-## Lessons Learned
-
-- Do not assume child runbooks inherit the parent execution environment.
+- Validate PowerShell 5.1 child script patterns before migration.
 - Do not assume authentication is shared.
-- Always verify execution location.
-- Explicitly specify Hybrid Workers when required.
-- Validate legacy PowerShell 5.1 patterns before migration.
-- Runtime Environment 7.x should be treated as a more isolated execution model.
+- Explicitly verify Hybrid Worker execution paths.
+- Treat child runbooks as independent jobs.
+- Test execution behavior when moving to Runtime Environment 7.x.
 
 ---
 
-## Conclusion
+# Conclusion
 
-The issue was not caused by a defect in Azure Automation Runtime Environment 7.x.
+This investigation demonstrates an important behavioral difference between PowerShell 5.1 and Azure Automation Runtime Environment 7.x.
 
-The failure occurred because the child script was not available within the Runtime Environment 7.x execution context.
-
-Traditional local child script invocation patterns that worked in PowerShell 5.1 should be revalidated when migrating to Runtime Environment 7.x.
+While local child script invocation may work in legacy implementations, Runtime Environment 7.x introduces stronger execution isolation and requires a different execution model.
 
 The recommended approach is:
 
 - Use `Start-AzAutomationRunbook`
 - Treat child runbooks as independent jobs
-- Establish authentication independently
+- Establish authentication explicitly
 - Explicitly specify Hybrid Worker execution when required
 
 Understanding these execution boundaries is critical when modernizing Azure Automation solutions for Runtime Environment 7.x.
 
 ---
 
+
 ## Full Report
 
-The complete investigation report is available in this repository as a PDF document.
+The complete investigation report can be downloaded below:
+
+[📄 Download Investigation Report](docs/Automation-Azure.pdf)
+
+Cloud Engineer | Azure Monitoring | Azure Automation | Microsoft Sentinel | Azure Arc | Hybrid Infrastructure
 
 ---
 
@@ -370,7 +491,10 @@ The complete investigation report is available in this repository as a PDF docum
 
 Microsoft Documentation
 
-- Azure Automation Child Runbooks
-- Start-AzAutomationRunbook
-- Azure Automation Runtime Environment
-- Azure Automation Hybrid Workers
+- [Azure Automation Child Runbooks](https://learn.microsoft.com/en-us/azure/automation/automation-child-runbooks#runbook-types)
+- [Start-AzAutomationRunbook](https://learn.microsoft.com/en-us/powershell/module/az.automation/start-azautomationrunbook)
+- [Get-AzAutomationJobOutput](https://learn.microsoft.com/en-us/powershell/module/az.automation/get-azautomationjoboutput)
+
+# Author
+
+**Avijit Dutta**
