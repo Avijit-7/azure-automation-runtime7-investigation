@@ -18,3 +18,14 @@ Download and read:
 - Start-AzAutomationRunbook
 - Managed Identity Authentication
 - Migration from PowerShell 5.1
+
+## References
+
+- Azure Automation Child Runbooks
+  https://learn.microsoft.com/en-us/azure/automation/automation-child-runbooks
+
+- Start-AzAutomationRunbook
+  https://learn.microsoft.com/en-us/powershell/module/az.automation/start-azautomationrunbook
+
+- Get-AzAutomationJobOutput
+  https://learn.microsoft.com/en-us/powershell/module/az.automation/get-azautomationjoboutput
